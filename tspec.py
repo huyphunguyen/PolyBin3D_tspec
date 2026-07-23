@@ -301,7 +301,7 @@ class TSpec:
         return np.where(good, t / N, 0.0)
 
     
-   def make_parity_odd_ic(base, delta_g, g):
+    def make_parity_odd_ic(base, delta_g, g):
     """delta_PV = delta_G + g*(v1 x v2).v3, v_n^a = IFFT[i k^a |k|^-n delta(k)], n =2,1,0"""
 
         dk = base.to_fourier(delta_g)
