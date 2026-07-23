@@ -27,13 +27,14 @@ class TSpec:
         self.n_diag = len(self.diag_bins) - 1
         self.shapes_odd = self.odd_shapes(self.n_k)
 
+
     # ------------------------------------------------------------------
     # band fitter
     # ------------------------------------------------------------------
     def _process_sim(self, delta, input_type='real'):
         """Return shell maps g_b(x) for every side bin b.
 
-         g_b(x) = IFFT[ W_b(k) * delta(k) ],  W_b = top-hat shell.
+        g_b(x) = IFFT[ W_b(k) * delta(k) ],  W_b = top-hat shell.
 
         Returns: list of n_k real-space arrays.
         """
@@ -78,7 +79,7 @@ class TSpec:
         return out
 
     def Tk_numerator(self, delta, input_type='real'):
-        """Raw 4-field quartic numerator (NO disconnected subtraction).
+        """Raw 4-field quartic numerator.
 
         Returns: array (n_shapes, n_diag), t[s,B] = Q(g,g,g,g)[s,B].
         """
@@ -91,7 +92,7 @@ class TSpec:
         return [(i, i, j, j) for i in range(n_k) for j in range(i, n_k)]
 
     # ------------------------------------------------------------------
-    #ideal normalization (mode counting)
+    # ideal normalization (mode counting)
     # ------------------------------------------------------------------
     def _unit_shell_maps(self):
         """Shell maps of a unit-amplitude field (delta(k)=1 for all k).
@@ -110,6 +111,7 @@ class TSpec:
         Cached after first call.
         """
         shapes = shapes if shapes is not None else self.shapes
+
         o = self._unit_shell_maps()
         N = np.zeros((len(shapes), self.n_diag))
         for s, (i,j,k,l) in enumerate(shapes):
@@ -153,10 +155,6 @@ class TSpec:
         t2 = <Q(d,d,a,a) + 4 Q(a,d,a,d) + Q(a,a,d,d)
             + Q(d,d,b,b) + 4 Q(b,d,b,d) + Q(b,b,d,d)>_sims / 2
         t0 = <Q(b,b,a,a) + 4 Q(a,b,a,b) + Q(a,a,b,b)>_sims / 2
-
-        Divisor 2n = number of random fields (2 per sim pair): each field's
-        6 placements estimate the full t2 target once; t0's 6 placements
-        double-cover the 3 Wick pairings. .
         """
     
 
@@ -184,21 +182,70 @@ class TSpec:
     # ------------------------------------------------------------------
     # parity odd part
     # ------------------------------------------------------------------
+    
     def _process_sim_vector(self, delta, input_type = 'real'):
-        "Vector shell maps: gv[b][a](x) = IFFT[ i k^a W_b(k) * delta(k) ]. a = x, y, z"
+        "Vector shell maps: gv[b][a](x) = IFFT[ i k_hat^a W_b(k) * delta(k) ]. a = x, y, z"
         delta_f = self.applySinv(delta, input_type=input_type, output_type='fourier')
         gv = []
        
+        k_hat = self._khat_comps()
+        for b in range(self.n_k):
+            filtered = self.base.map_utils.fourier_filter(delta_f, 0, self.k_bins[b], self.k_bins[b+1])
+            gv_b = [self.base.to_real(1j * filtered * k_hat[a]) for a in range(3)]
+            gv.append(gv_b)
+        return gv
+
+    def _khat_comps(self):
+        """list of 3 broadcastable arrays k_hat^a = k^a/|k|", zero-safe at k = 0"""
+        modk = np.where(self.base.modk_grid ==0, 1.0, self.base.modk_grid)
         k_comps = [
             self.base.k_arrs[0][:,None, None], #k_x
             self.base.k_arrs[1][None, :, None], #k_y
             self.base.k_arrs[2][None, None, :], #k_z
         ]
-        for b in range(self.n_k):
-            filtered = self.base.map_utils.fourier_filter(delta_f, 0, self.k_bins[b], self.k_bins[b+1])
-            gv_b = [self.base.to_real(1j * filtered * k_comp) for k_comp in k_comps]
-            gv.append(gv_b)
-        return gv
+        return [k_c/modk for k_c in k_comps]
+
+    def _unit_tensor_shell_maps(self):
+        """ t[b][c][d](x) = IFFT[k_hat^c k_hat^d W_b(k)]. Symmetry 3x3 per bin"""
+        ones_k = self.base.complex_zeros()+1.0
+        k_hat = self._khat_comps()
+        ts = []
+        for b in range (self.n_k):
+            tb = [[None]*3 for _ in range(3)]
+            for c in range(3):
+                for d in range(c, 3):
+                    filtered = self.base.map_utils.fourier_filter(k_hat[c] * k_hat[d] * ones_k, 0 , self.k_bins[b], self.k_bins[b +1])
+                    tb[c][d] = tb[d][c] = self.base.to_real(filtered)
+            ts.append(tb)
+        return ts
+                
+                
+        
+    def mode_counts_odd(self):
+        """N_odd[s, B] = sum over quadruplets of [(k1 x k2). k3]^2"""
+        # levi-civita 
+        eps = [(0, 1, 2, +1), (0,2,1, -1),                 #x - component: +y*z, -z*y
+             (1, 2, 0, +1) , (1, 0, 2, -1),                #y - component: +z*, -x*z
+             (2, 0, 1, +1) , (2,1,0,-1)                    #z - component: +x*y, -y*x 
+        ]
+        t = self._unit_tensor_shell_maps()
+        o = self._unit_shell_maps()
+        prod = self.base.map_utils.prod_real
+        N = np.zeros((len(self.shapes_odd), self.n_diag))
+        
+        for s, (i, j , k, l) in enumerate(self.shapes_odd):
+            M = [[np.zeros_like(o[0]) for _ in range(3)] for _ in range(3)]
+            for (a, c,d, s1) in eps:
+                for (b, e, f, s2) in eps:
+                    M[a][b] += s1*s2* prod(t[i][c][e], t[j][d][f])
+            S = [[prod(t[k][a][b], o[l]) for b in range(3)] for a in range(3)]
+            for B in range(self.n_diag):
+                    N[s, B] += sum(self.base.map_utils.sum_pair(self._diag_filter(M[a][b], B), S[a][b]) for a in range(3) for b in range(3))
+        return N
+                    
+                    
+        
+        
 
     def _cross_pair_field(self, gv_i, gv_j):
         """Vector pair field C_a(x) = (g_i x g_j)_a(x), a = x, y, z. cross part of the triple product (k1 x k2).k3"""
@@ -209,14 +256,14 @@ class TSpec:
             prod(gv_i[2], gv_j[0]) - prod(gv_i[0], gv_j[2]), # y
             prod(gv_i[0], gv_j[1]) - prod(gv_i[1], gv_j[0]), # z
         ]
-        return cross 
-    
+        return cross
 
     def _vector_scalar_pair(self, gv_k, g_l):
         """Vector pair field gv_k[a](x) * g_l(x), a = x, y, z"""
         return [self.base.map_utils.prod_real(gv_k[a], g_l) for a in range(3)]
 
 
+    
     @staticmethod
     def odd_shapes(n_k):
         """parity odd shape family: (i, j, i, j) for i < j (q1 < q2, q3 < q4 Eq. A11 in arxiv2306.11782)"""
@@ -235,7 +282,7 @@ class TSpec:
         return out
     
     def Tk_odd_numerator(self, delta, input_type='real'):
-        """Raw 4-field odd numerator.
+        """Raw 4-field odd numerator (NO disconnected subtraction).
 
         Returns: array (n_shapes_odd, n_diag), t[s,B] = Q(gv,gv,gv,g)[s,B].
         """
@@ -248,14 +295,14 @@ class TSpec:
         """Mode-count normalized odd trispectrum (ideal estimator). t / N_modes."""
 
         t = self.Tk_odd_numerator(delta, input_type=input_type)
-        N = self._mode_counts(shapes=self.shapes_odd)
+        N = self.mode_counts_odd()
 
-        good = N > 1e-6*N.max()
+        good = N > 1e-3*N.max()
         return np.where(good, t / N, 0.0)
-    
 
-    def make_parity_odd_ic(base, delta_g, g):
-        """delta_PV = delta_G + g*(v1 x v2).v3, v_n^a = IFFT[i k^a |k|^-n delta(k)], n =2,1,0"""
+    
+   def make_parity_odd_ic(base, delta_g, g):
+    """delta_PV = delta_G + g*(v1 x v2).v3, v_n^a = IFFT[i k^a |k|^-n delta(k)], n =2,1,0"""
 
         dk = base.to_fourier(delta_g)
         modk = np.where(base.modk_grid == 0, 1.0, base.modk_grid)
